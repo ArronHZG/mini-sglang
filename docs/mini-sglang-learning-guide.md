@@ -396,22 +396,28 @@ sequenceDiagram
     participant Loop as 主循环
     participant GPU as GPU 计算
     participant CPU as CPU 调度
-    Note over Loop, CPU: Normal Mode: 串行执行
-    Loop ->> CPU: 1. 调度 (准备 batch)
-    CPU -->> Loop: batch 就绪
-    Loop ->> GPU: 2. 执行 forward
-    GPU -->> Loop: 结果返回
-    Loop ->> CPU: 3. 后处理 (采样/更新状态)
-    CPU -->> Loop: 完成
-    Note over Loop, CPU: Overlap Mode: 并行执行
-    par GPU 计算 & CPU 调度并行
-        Loop ->> GPU: N. 执行 forward (上一轮 batch)
+
+    rect rgb(224, 247, 250)
+        Note right of Loop: Normal Mode 串行执行
+        Loop ->> CPU: 1. 调度准备 batch
+        CPU -->> Loop: batch 就绪
+        Loop ->> GPU: 2. 执行 forward
         GPU -->> Loop: 结果返回
-    and
-        Loop ->> CPU: N+1. 调度 (准备下一轮 batch)
-        CPU -->> Loop: 下一轮 batch 就绪
+        Loop ->> CPU: 3. 后处理采样和更新状态
+        CPU -->> Loop: 完成
     end
-    Loop ->> CPU: 后处理结果 + 准备好的下一轮 batch
+
+    rect rgb(252, 228, 236)
+        Note right of Loop: Overlap Mode 并行执行
+        par GPU 计算与 CPU 调度并行
+            Loop ->> GPU: N. 执行 forward 上一轮 batch
+            GPU -->> Loop: 结果返回
+        and
+            Loop ->> CPU: N加1. 调度准备下一轮 batch
+            CPU -->> Loop: 下一轮 batch 就绪
+        end
+        Loop ->> CPU: 后处理结果并准备好的下一轮 batch
+    end
 ```
 
 **关键思想**：在 GPU 执行当前 batch 的 forward 时，CPU 同时准备下一个 batch，隐藏调度开销。
@@ -420,19 +426,19 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[长序列请求] --> B{"序列长度 > max_prefill?"}
-    B -->|否| C[普通 Prefill<br/>一次处理全部 tokens]
+    A[长序列请求] --> B{"序列长度大于 max_prefill?"}
+    B -->|否| C[普通 Prefill: 一次处理全部 tokens]
     B -->|是| D[创建 ChunkedReq]
-    D --> E[计算 chunk_size<br/>min(剩余长度, max_prefill)]
-E --> F[Prefill Chunk 1<br/>tokens[0:chunk_size]]
-F --> G{还有剩余?}
-G -->|是|H[更新 cached_len<br/>移动起始位置]
-H --> I[Prefill Chunk N<br/>tokens[cached_len:cached_len+chunk_size]]
-I --> G
-G -->|否|J[所有 chunks 处理完毕<br/>进入 Decode]
+    D --> E[计算 chunk_size: min 剩余长度与 max_prefill]
+    E --> F[Prefill Chunk 1: tokens 下标 0 到 chunk_size]
+    F --> G{还有剩余?}
+    G -->|是| H[更新 cached_len 并移动起始位置]
+    H --> I[Prefill Chunk N: 处理后续 chunk]
+    I --> G
+    G -->|否| J[所有 chunks 处理完毕并进入 Decode]
 
-style D fill: #fff3e0
-style J fill: #c8e6c9
+    style D fill: #fff3e0
+    style J fill: #c8e6c9
 ```
 
 ### 5.4 Radix Cache 前缀匹配
@@ -485,33 +491,33 @@ flowchart TD
     CHECK -->|是| CG[GraphRunner.replay]
     CHECK -->|否| NORMAL[普通 Forward]
 
-subgraph Forward["Model Forward"]
-EMB[Embedding Lookup]
-LAYERS[Transformer Layers × N]
-HEAD[LM Head 投影]
-end
+    subgraph Forward["Model Forward"]
+        EMB[Embedding Lookup]
+        LAYERS[Transformer Layers x N]
+        HEAD[LM Head 投影]
+    end
 
-subgraph LayerOps["单层操作"]
-ATTN[Self Attention]
-NORM[RMSNorm]
-MLP[MLP / MoE]
-RES[残差连接]
-end
+    subgraph LayerOps["单层操作"]
+        ATTN[Self Attention]
+        NORM[RMSNorm]
+        MLP[MLP or MoE]
+        RES[残差连接]
+    end
 
-NORMAL --> Forward
-CG --> LOGITS[获取 Logits]
-Forward --> LOGITS
-LOGITS --> SAMPLE[Sampler.sample]
-SAMPLE --> NEXT[next_tokens]
+    NORMAL --> Forward
+    CG --> LOGITS[获取 Logits]
+    Forward --> LOGITS
+    LOGITS --> SAMPLE[Sampler.sample]
+    SAMPLE --> NEXT[next_tokens]
 
-LAYERS --> LayerOps
-ATTN --> NORM
-NORM --> MLP
-MLP --> RES
-RES --> LAYERS
+    LAYERS --> LayerOps
+    ATTN --> NORM
+    NORM --> MLP
+    MLP --> RES
+    RES --> LAYERS
 
-style BATCH fill: #e1f5fe
-style NEXT fill: #c8e6c9
+    style BATCH fill: #e1f5fe
+    style NEXT fill: #c8e6c9
 ```
 
 ### 6.2 GraphRunner - CUDA Graph 管理
@@ -523,7 +529,7 @@ graph TB
     CAPTURE --> BS2["BS=2"]
     CAPTURE --> BS4["BS=4"]
     CAPTURE --> BSN["BS=8,16,24,..."]
-    RUNTIME["运行时"] --> CHECK{"batch.is_decode<br/>&& bs ≤ max_graph_bs"}
+    RUNTIME["运行时"] --> CHECK{"batch.is_decode 且 bs 小于等于 max_graph_bs"}
     CHECK -->|是| REPLAY["重放对应 BS 的 Graph"]
     CHECK -->|否| EAGER["Eager 执行"]
 
@@ -553,21 +559,21 @@ cuda_graph_bs = [1, 2, 4] + list(range(8, max_bs, 8))
 ```mermaid
 flowchart TD
     LOGITS[Logits Tensor] --> MODE{"sampling_mode"}
-    MODE -->|" greedy "| ARGMAX[argmax → 最可能 token]
-MODE -->|" random "|TEMP[温度缩放]
-TEMP --> TOPK{top_k > 0?}
-TOPK -->|是| FILTER_K[保留 top-k]
-TOPK -->|否|TOPP{top_p < 1.0?}
-TOPP -->|是|FILTER_P[核采样 top-p]
-TOPP -->|否|SOFTMAX[直接 softmax]
-FILTER_K --> SOFTMAX
-FILTER_P --> SOFTMAX
-SOFTMAX --> MULTINOMIAL[multinomial 采样]
-MULTINOMIAL --> TOKEN[sampled token]
-ARGMAX --> TOKEN
+    MODE -->|"greedy"| ARGMAX[argmax 选择最可能 token]
+    MODE -->|"random"| TEMP[温度缩放]
+    TEMP --> TOPK{top_k 大于 0?}
+    TOPK -->|是| FILTER_K[保留 top-k]
+    TOPK -->|否| TOPP{top_p 小于 1.0?}
+    TOPP -->|是| FILTER_P[核采样 top-p]
+    TOPP -->|否| SOFTMAX[直接 softmax]
+    FILTER_K --> SOFTMAX
+    FILTER_P --> SOFTMAX
+    SOFTMAX --> MULTINOMIAL[multinomial 采样]
+    MULTINOMIAL --> TOKEN[sampled token]
+    ARGMAX --> TOKEN
 
-style LOGITS fill: #e1f5fe
-style TOKEN fill: #c8e6c9
+    style LOGITS fill: #e1f5fe
+    style TOKEN fill: #c8e6c9
 ```
 
 ---
@@ -664,13 +670,13 @@ graph LR
 flowchart TD
     SAFE["Safetensors 文件"] --> LOAD["流式加载权重"]
     LOAD --> QKV_FUSE{"包含 q/k/v proj?"}
-    QKV_FUSE -->|是| MERGE_QKV["融合为 qkv_proj<br/>[q, k, v] 拼接"]
+    QKV_FUSE -->|是| MERGE_QKV["融合为 qkv_proj: q k v 拼接"]
     QKV_FUESE -->|否| SKIP1[保持原样]
     LOAD --> FFN_FUSE{"包含 gate/up proj?"}
-    FFN_FUSE -->|是| MERGE_FFN["融合为 gate_up_proj<br/>[gate, up] 拼接"]
+    FFN_FUSE -->|是| MERGE_FFN["融合为 gate_up_proj: gate up 拼接"]
     FFN_FUSE -->|否| SKIP2[保持原样]
     LOAD --> MOE_PACK{"是 MoE 模型?"}
-    MOE_PACK -->|是| PACK_EXP["打包 Expert 权重<br/>reshape 为连续块"]
+    MOE_PACK -->|是| PACK_EXP["打包 Expert 权重并 reshape 为连续块"]
     MOE_PACK -->|否| SKIP3[保持原样]
     MERGE_QKV --> TP_SHARD["按 TP rank 分片"]
     MERGE_FFN --> TP_SHARD
@@ -740,19 +746,16 @@ sequenceDiagram
     participant Wrapper as FlashInfer Wrapper
     participant Cache as KV Cache
     Batch ->> Meta: 1. 准备元数据
-    Note over Meta: - 计算 qo_indptr (query offset)<br/>- 准备 page_table<br/>- 分配 workspace buffer
-    Meta ->> Wrapper: 2. plan(run_args)
+    Note over Meta: 计算qo_indptr和page_table并分配workspace
+    Meta ->> Wrapper: 2. plan with run_args
     Note over Wrapper: 预分配内部缓冲区
-    Batch ->> Store: 3. 存储 K, V
-    Store ->> Cache: store_cache_kernel(k, v, out_loc, layer_id)
-    Note over Cache: 写入 paged_kv_cache
-    Batch ->> Wrapper: 4. 执行注意力
-    Wrapper ->> Cache: 读取 paged_kv_cache
-    Cache -->> Wrapper: KV 数据
-    Wrapper -->> Batch: attention output
-
-style Batch fill:#e1f5fe
-style Cache fill:#e8f5e9
+    Batch ->> Store: 3. 存储 K 和 V
+    Store ->> Cache: store_cache_kernel写入KV
+    Note over Cache: 写入 paged kv cache
+    Batch ->> Wrapper: 4. 执行注意力计算
+    Wrapper ->> Cache: 读取 paged kv cache
+    Cache -->> Wrapper: 返回 KV 数据
+    Wrapper -->> Batch: 返回 attention output
 ```
 
 ### 8.3 Paged Attention 数据布局
@@ -851,31 +854,18 @@ stateDiagram-v2
     Idle --> Matching: 新请求到达
     Matching --> Hit: 前缀匹配成功
     Matching --> Miss: 无匹配前缀
-
-state Hit {
---> ReturnHandle: 返回缓存句柄
---> UpdateLRU: 更新 LRU 顺序
-}
-
-state Miss {
---> AllocateNew: 分配新 Cache 页
---> FullPrefill: 全量 Prefill
-}
-
-Hit --> PrefillRemaining: Prefill 未缓存部分
-Miss --> PrefillRemaining
-FullPrefill --> PrefillRemaining
-
-PrefillRemaining --> Decoding: 进入 Decode 阶段
-Decoding --> Finished: 生成完成
-
-state Finished {
---> InsertToTree: 插入前缀到 Radix Tree
---> UnlockHandle: 解锁缓存句柄
---> EvictIfNeeded: 显存不足时驱逐
-}
-
-Finished --> Idle: 资源已释放
+    Hit --> ReturnHandle: 返回缓存句柄
+    ReturnHandle --> UpdateLRU: 更新 LRU 顺序
+    UpdateLRU --> PrefillRemaining: Prefill 未缓存部分
+    Miss --> AllocateNew: 分配新 Cache 页
+    AllocateNew --> FullPrefill: 全量 Prefill
+    FullPrefill --> PrefillRemaining
+    PrefillRemaining --> Decoding: 进入 Decode 阶段
+    Decoding --> Finished: 生成完成
+    Finished --> InsertToTree: 插入前缀到 Radix Tree
+    InsertToTree --> UnlockHandle: 解锁缓存句柄
+    UnlockHandle --> EvictIfNeeded: 显存不足时驱逐
+    EvictIfNeeded --> Idle: 资源已释放
 ```
 
 ### 9.3 内存管理流程
@@ -906,46 +896,46 @@ flowchart TD
 
 ```mermaid
 graph TB
-subgraph MoELayer["MoE 层"]
-INPUT[hidden_states]
-ROUTER[Router<br/>线性投影 → softmax → topk]
+    subgraph MoELayer["MoE 层"]
+        INPUT[hidden_states]
+        ROUTER[Router: 线性投影到 softmax 到 topk]
 
-subgraph Experts["Expert 处理"]
-W1["W1 (gate_proj)<br/>第一层线性"]
-ACT["SiLU 激活"]
-W2["W2 (up/down_proj)<br/>第二层线性"]
-end
+        subgraph Experts["Expert 处理"]
+            W1["W1 gate_proj: 第一层线性"]
+            ACT["SiLU 激活"]
+            W2["W2 up or down_proj: 第二层线性"]
+        end
 
-OUTPUT[加权求和 → 输出]
-end
+        OUTPUT[加权求和后输出]
+    end
 
-INPUT --> ROUTER
-ROUTER -->|"topk_ids, topk_weights "|EXPERTS
-EXPERTS --> OUTPUT
+    INPUT --> ROUTER
+    ROUTER --> EXPERTS
+    EXPERTS --> OUTPUT
 
-style MoELayer fill: #f3e5f5
+    style MoELayer fill: #f3e5f5
 ```
 
 ### 10.2 Fused MoE Kernel 流程
 
 ```mermaid
 flowchart TD
-    INPUT[hidden_states<br/>(seq_len, hidden_dim)]
-ROUTER_LOGITS[router_logits<br/>(seq_len, num_experts)]
+    INPUT["hidden_states: seq_len x hidden_dim"]
+    ROUTER_LOGITS["router_logits: seq_len x num_experts"]
 
-INPUT --> TOPK[fused_topk]
-ROUTER_LOGITS --> TOPK
+    INPUT --> TOPK[fused_topk]
+    ROUTER_LOGITS --> TOPK
 
-TOPK -->|" topk_weights<br/>topk_ids"|ALIGN1[moe_align_block_size<br/>对齐 token 到 block]
-ALIGN1 --> STAGE1[fused_moe_kernel_triton<br/>Stage 1: W1 × x]
-STAGE1 --> SILU[silu_and_mul<br/>SiLU 激活]
-SILU --> ALIGN2[moe_align_block_size<br/>重新对齐]
-ALIGN2 --> STAGE2[fused_moe_kernel_triton<br/>Stage 2: W2 × act]
-STAGE2 --> REDUCE[moe_sum_reduce_triton<br/>加权求和归约]
-REDUCE --> OUTPUT[output<br/>(seq_len, hidden_dim)]
+    TOPK --> ALIGN1[moe_align_block_size 对齐 token 到 block]
+    ALIGN1 --> STAGE1["fused_moe_kernel_triton Stage 1: W1 乘 x"]
+    STAGE1 --> SILU[silu_and_mul: SiLU 激活]
+    SILU --> ALIGN2[moe_align_block_size 重新对齐]
+    ALIGN2 --> STAGE2["fused_moe_kernel_triton Stage 2: W2 乘 act"]
+    STAGE2 --> REDUCE[moe_sum_reduce_triton: 加权求和归约]
+    REDUCE --> OUTPUT["output: seq_len x hidden_dim"]
 
-style INPUT fill: #e1f5fe
-style OUTPUT fill: #c8e6c9
+    style INPUT fill: #e1f5fe
+    style OUTPUT fill: #c8e6c9
 ```
 
 **MoE 关键优化**：
@@ -1071,22 +1061,22 @@ graph TB
         EMB[Embedding]
         LAYER1[Layer 1: Attn + MLP]
         LAYER2[Layer 2: Attn + MLP]
-        LAYERN["..."]
+        LAYERN["... 更多层 ..."]
         LAST_LAYER[Layer N: Attn + MLP]
         HEAD[LM Head]
     end
 
-subgraph NotCaptured["不在捕获范围内"]
-KV_STORE[KV Cache 写入<br/>(动态地址)]
-SAMPLING[采样<br/>(依赖动态 logits)]
-META_PREP[元数据准备<br/>(每批变化)]
-end
+    subgraph NotCaptured["不在捕获范围内"]
+        KV_STORE["KV Cache 写入 (动态地址)"]
+        SAMPLING["采样 (依赖动态 logits)"]
+        META_PREP["元数据准备 (每批变化)"]
+    end
 
-Captured --> LOGITS[Logits 输出]
-LOGITS --> NotCaptured
+    Captured --> LOGITS[Logits 输出]
+    LOGITS --> NotCaptured
 
-style Captured fill: #c8e6c9
-style NotCaptured fill: #ffcdd2
+    style Captured fill: #c8e6c9
+    style NotCaptured fill: #ffcdd2
 ```
 
 > **注意**：KV Cache 写入使用动态索引（`out_loc`），无法被 CUDA Graph 捕获，因此在 graph replay 后单独执行。
@@ -1141,9 +1131,7 @@ def create_my_backend(config):
 
 
 # 3. 使用
-python - m
-minisgl - -model... - -attn
-my_backend
+# python -m minisgl --model ... --attn my_backend
 ```
 
 ### 13.2 抽象基类体系
@@ -1269,5 +1257,4 @@ python -m minisgl --model Qwen/Qwen3-0.6B --shell
 
 ---
 
-> 📖 **文档说明**：本文档基于 mini-sglang 源码自动生成，所有 Mermaid 图表均反映真实代码架构。建议结合源码阅读以获得更深入的理解。
 
